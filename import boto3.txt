@@ -1,0 +1,104 @@
+import boto3
+from PIL import Image, ImageFile
+import io
+
+ImageFile.LOAD_TRUNCATED_IMAGES = True
+
+s3 = boto3.client("s3")
+
+BUCKET = "deepak-image-scaling"
+ORIGINAL_PREFIX = "original/"
+RESIZED_PREFIX = "resized/"
+RESTORED_PREFIX = "restored/"
+
+DEFAULT_WIDTH = 300
+DEFAULT_HEIGHT = 300
+
+
+def lambda_handler(event, context):
+    try:
+        record = event["Records"][0]
+        key = record["s3"]["object"]["key"]
+        bucket = record["s3"]["bucket"]["name"]
+
+        print(f"Triggered for key: {key}")
+
+        if key.startswith(ORIGINAL_PREFIX):
+            return resize_image(bucket, key)
+
+        elif key.startswith(RESIZED_PREFIX):
+            return restore_image(bucket, key)
+
+        else:
+            return {"message": "Ignored file"}
+
+    except Exception as e:
+        print("ERROR:", str(e))
+        return {"error": str(e)}
+
+
+# -------------------- RESIZE --------------------
+def resize_image(bucket, key):
+    filename = key.replace(ORIGINAL_PREFIX, "")
+
+    obj = s3.get_object(Bucket=bucket, Key=key)
+    body = obj["Body"].read()
+    metadata = obj.get("Metadata", {})
+
+    width = int(metadata.get("width", DEFAULT_WIDTH))
+    height = int(metadata.get("height", DEFAULT_HEIGHT))
+
+    img = Image.open(io.BytesIO(body))
+    img.load()
+
+    # Resize image
+    resized = img.resize((width, height), Image.LANCZOS)
+
+    buffer = io.BytesIO()
+    fmt = img.format or "PNG"
+    resized.save(buffer, fmt)
+    buffer.seek(0)
+
+    resized_key = f"{RESIZED_PREFIX}{filename}"
+
+    # Upload resized image
+    s3.put_object(
+        Bucket=bucket,
+        Key=resized_key,
+        Body=buffer,
+        ContentType=f"image/{fmt.lower()}"
+    )
+
+    print(f"Resized image saved to {resized_key}")
+
+    return {"message": "Image resized", "resized_key": resized_key}
+
+def restore_image(bucket, key):
+    import os
+    filename = os.path.basename(key)  
+    original_key = f"{ORIGINAL_PREFIX}{filename}"
+    restored_key = f"{RESTORED_PREFIX}{filename}"
+
+    try:
+        
+        original_obj = s3.get_object(Bucket=bucket, Key=original_key)
+        original_body = original_obj["Body"].read()
+
+        
+        s3.put_object(
+            Bucket=bucket,
+            Key=restored_key,
+            Body=original_body,
+            ContentType=original_obj.get("ContentType", "image/png")
+        )
+
+        print(f"Original restored to {restored_key}")
+        return {"message": "Original restored", "restored_key": restored_key}
+
+    except s3.exceptions.NoSuchKey:
+        print(f"Original image not found for {filename}")
+        return {"error": f"Original image {filename} not found in original/ folder"}
+    except Exception as e:
+        print("Restore failed:", str(e))
+        return {"error": str(e)}
+-------------------------------------------------------------------------------------------
